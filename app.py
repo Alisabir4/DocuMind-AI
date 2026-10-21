@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import os
 import html
-import logging
 import re
 from pathlib import Path
 from typing import Any
@@ -12,9 +11,7 @@ import streamlit as st
 
 from src.database.store import Store
 from src.embeddings.encoder import Encoder, MODEL_NAME
-from src.llm.gemini import GeminiClient, GeminiError, get_api_key
-from src.llm.ollama import OllamaClient
-from src.llm.providers import OllamaGenerationError, OllamaUnavailable, generate_text, normalize_provider, remember_provider_selection
+from src.llm.gemini import GEMINI_FAILURE_MESSAGE, GeminiClient, GeminiError, answer_with_gemini, get_api_key
 from src.llm.summarize import summarize
 from src.retrieval.index import Retriever
 from src.services.documents import ingest
@@ -22,7 +19,6 @@ from src.services.documents import ingest
 ROOT = Path(__file__).parent
 DATA = Path(os.getenv("DOCUMIND_DATA_DIR", str(ROOT / "data")))
 STORE = Store(DATA / "documind.sqlite3")
-logger = logging.getLogger("documind")
 
 st.set_page_config(
     page_title="DocuMind AI",
@@ -482,26 +478,21 @@ def analysis_page(docs: list[dict[str, Any]]) -> None:
     with action_col:
         generate = st.button("Generate analysis", type="primary", icon=":material/auto_awesome:", use_container_width=True, key="generate_analysis")
     with info_col:
-        provider = normalize_provider(st.session_state.get("dm_selected_provider", "ollama")) or "ollama"
-        caption = "Uses extractive evidence by default. Ollama can add a local generated overview when available."
-        if provider == "gemini":
-            caption = "Gemini cloud mode is selected. Source text is sent only after you enable consent in Settings."
-        st.caption(caption)
+        st.caption("Gemini can add a generated overview after you enable cloud-data consent in Settings.")
     if generate:
-        if provider == "gemini" and not st.session_state.get("dm_gemini_cloud_consent", False):
+        if not st.session_state.get("dm_gemini_cloud_consent", False):
             st.warning("Enable Gemini cloud consent in Settings before sending document text for analysis. No document text was sent.")
-        elif provider == "gemini" and not get_api_key():
-            st.error("Gemini API key not found. Configure GEMINI_API_KEY in the environment or Streamlit secrets. No document text was sent.")
+        elif not get_api_key():
+            st.error(GEMINI_FAILURE_MESSAGE)
         else:
-            if provider == "gemini":
-                st.info("This analysis sends the selected document’s extracted text (up to 12,000 characters) and the summary prompt to Google Gemini. The PDF file itself stays local.")
-            llm = GeminiClient(model=st.session_state.get("gemini_model")) if provider == "gemini" else OllamaClient()
+            st.info("This analysis sends the selected document’s extracted text (up to 12,000 characters) and the summary prompt to Google Gemini. The PDF file itself stays local.")
+            llm = GeminiClient()
             try:
                 with st.spinner("Reading and organizing source evidence…"):
                     result = summarize(STORE.page_text(chosen["id"]), llm)
                 st.session_state["analysis_result"] = (chosen["id"], result)
-            except GeminiError as exc:
-                st.error(str(exc))
+            except GeminiError:
+                st.error(GEMINI_FAILURE_MESSAGE)
     cached = st.session_state.get("analysis_result")
     if not cached or cached[0] != chosen["id"]:
         empty("Ready when you are", "Generate an analysis to see the summary, key points, dates, and source pages.")
@@ -514,7 +505,7 @@ def analysis_page(docs: list[dict[str, Any]]) -> None:
     with tabs[0]:
         with st.container(border=True):
             if result.get("generated"):
-                st.markdown("#### Local model overview")
+                st.markdown("#### Gemini overview")
                 st.write(result["generated"])
                 st.caption("Model-generated interpretation. Verify each claim against the source passages.")
         with st.container(border=True):
@@ -570,40 +561,14 @@ def answer_question(question: str, selected: list[dict[str, Any]]) -> None:
             {"name": match["name"], "page": match["page"], "text": match["text"], "score": match["score"]}
             for match in matches
         ]
-        evidence = "\n\n".join(
-            f"[Source {index + 1}: {source['name']}, page {source['page']}]\n{source['text']}"
-            for index, source in enumerate(sources)
-        )
-        provider = st.session_state.get("dm_selected_provider", "ollama")
-        prompt = (
-            "Answer only from the retrieved evidence. If evidence is insufficient, say so plainly. "
-            "Cite evidence only with the exact labels [Source 1], [Source 2], etc. shown below. "
-            "Do not invent document names, page numbers, or source labels.\n\n"
-            f"QUESTION: {question}\n\nSOURCES:\n{evidence}"
-        )
         if matches:
-            provider_id = normalize_provider(provider) or "unrecognized"
-            logger.warning(
-                "qa_diagnostic selected_provider=%s gemini_api_key_configured=%s cloud_consent=%s",
-                provider_id,
-                bool(get_api_key()),
-                bool(st.session_state.get("dm_gemini_cloud_consent", False)),
-            )
-            try:
-                answer = generate_text(
-                    provider,
-                    prompt,
-                    cloud_consent=bool(st.session_state.get("dm_gemini_cloud_consent", False)),
-                    gemini_factory=lambda: GeminiClient(model=st.session_state.get("gemini_model")),
-                )
-            except GeminiError as exc:
-                answer = str(exc)
-            except OllamaUnavailable:
-                answer = "I found relevant passages, but a generative answer is unavailable because the configured Ollama model is not running. Review the cited evidence on the right."
-            except OllamaGenerationError as exc:
-                answer = str(exc)
-            except ValueError as exc:
-                answer = str(exc)
+            if not st.session_state.get("dm_gemini_cloud_consent", False):
+                answer = "Enable Gemini cloud consent in Settings before asking. No document text was sent."
+            else:
+                try:
+                    answer = answer_with_gemini(question, sources, cloud_consent=True)
+                except Exception:
+                    answer = GEMINI_FAILURE_MESSAGE
             valid_labels = {f"Source {index + 1}" for index in range(len(sources))}
             for label in re.findall(r"Source\s+\d+", answer):
                 if label not in valid_labels:
@@ -612,11 +577,6 @@ def answer_question(question: str, selected: list[dict[str, Any]]) -> None:
             answer = "The selected documents do not contain enough indexed evidence to answer this question."
         st.session_state["conversation"].append({"role": "assistant", "content": answer, "sources": sources})
     except Exception as exc:
-        logger.warning(
-            "qa_diagnostic stage=retrieval_or_request exception_type=%s error=%s",
-            type(exc).__name__,
-            f"status {getattr(exc, 'status_code', '')}" if str(getattr(exc, "status_code", "")).isdigit() else "details omitted",
-        )
         st.session_state["conversation"].append({
             "role": "assistant",
             "content": f"Local semantic search could not start: {exc}. Install the project dependencies and allow the embedding model to download on first use.",
@@ -629,7 +589,7 @@ def ask_page(docs: list[dict[str, Any]]) -> None:
     if not available:
         empty("Your research space is empty", "Import and process a text-based PDF to ask questions with page citations.")
         return
-    if normalize_provider(st.session_state.get("dm_selected_provider")) == "gemini" and st.session_state.get("dm_gemini_cloud_consent", False):
+    if st.session_state.get("dm_gemini_cloud_consent", False):
         st.info("Cloud AI is enabled. Your question and retrieved passages will be sent to Google Gemini; source retrieval and citations remain local.")
     selected = st.multiselect("Search across", available, default=available, format_func=lambda doc: doc["name"], key="qa_documents")
     chat_col, sources_col = st.columns([1.15, .85], gap="large")
@@ -714,70 +674,25 @@ def evaluation_page() -> None:
 def settings_page() -> None:
     encoder = Encoder()
     _, embedding_status = encoder.status()
-    ollama = OllamaClient()
-    models = ollama.models()
-    a, b = st.columns(2, gap="large")
-    with a:
-        with st.container(border=True):
-            st.markdown("#### Semantic search")
-            st.write(f"**Embedding model**  \n`{MODEL_NAME}`")
-            st.write(f"**Status**  \n{embedding_status}")
-            st.caption("Runs on CPU. The model is fetched from Hugging Face the first time you index or search.")
-    with b:
-        with st.container(border=True):
-            st.markdown("#### Local language model")
-            st.write(f"**Ollama**  \n{'Available' if models else 'Not detected'}")
-            st.write(f"**Configured model**  \n`{ollama.model}`")
-            st.caption("Optional local generation. Ollama processes prompts on this device.")
+    with st.container(border=True):
+        st.markdown("#### Semantic search")
+        st.write(f"**Embedding model**  \n`{MODEL_NAME}`")
+        st.write(f"**Status**  \n{embedding_status}")
+        st.caption("Runs on CPU. The model is fetched from Hugging Face the first time you index or search.")
 
-    section_heading("AI provider and privacy", "Cloud use is off until you choose Gemini and enable consent")
-    # The canonical value uses a fresh non-widget key. Streamlit cleans up widget
-    # state for controls not rendered on a page, including keys used by old app
-    # versions, so never reuse the old widget keys for persistent settings.
-    if "_ai_provider_widget" not in st.session_state:
-        st.session_state["_ai_provider_widget"] = normalize_provider(
-            st.session_state.get("dm_selected_provider", st.session_state.get("ai_provider", "ollama"))
-        ) or "ollama"
-    provider = st.radio(
-        "Generation provider",
-        ["ollama", "gemini"],
-        format_func=lambda item: "Local · Ollama" if item == "ollama" else "Cloud · Google Gemini",
-        horizontal=True,
-        key="_ai_provider_widget",
+    section_heading("Gemini and privacy", "Gemini is the only AI answer provider")
+    st.warning("When you request an answer or generated summary, Gemini receives your question and retrieved passages or the selected document’s extracted text. PDF files, the local database, embeddings, and chat history stay local.")
+    if "_gemini_consent_widget" not in st.session_state:
+        st.session_state["_gemini_consent_widget"] = bool(st.session_state.get("dm_gemini_cloud_consent", False))
+    consent = st.checkbox(
+        "I understand document text will be sent to Google Gemini when I request an answer or generated summary.",
+        key="_gemini_consent_widget",
     )
-    remember_provider_selection(st.session_state, provider)
-    if provider == "gemini":
-        st.warning("Gemini sends the question and retrieved passages for Q&A, or the selected document’s extracted text for summaries, to Google for generation. PDF files, the local database, embeddings, and chat history are not uploaded. Review your organization’s data policy before enabling cloud mode.")
-        if "_gemini_consent_widget" not in st.session_state:
-            st.session_state["_gemini_consent_widget"] = bool(
-                st.session_state.get("dm_gemini_cloud_consent", st.session_state.get("gemini_cloud_consent", False))
-            )
-        consent = st.checkbox(
-            "I understand document text for summaries, or retrieved passages and my question for Q&A, will be sent to Google Gemini when I request generation.",
-            key="_gemini_consent_widget",
-        )
-        st.session_state["dm_gemini_cloud_consent"] = consent
-        api_key_present = bool(get_api_key())
-        if not api_key_present:
-            st.info("Gemini API key not found. Set GEMINI_API_KEY in the environment or add it to .streamlit/secrets.toml. The key is never shown in this app.")
-        else:
-            st.caption("The key is configured. Model discovery contacts Google’s model-list endpoint but does not send document contents.")
-            if st.button("Discover available Gemini models", icon=":material/travel_explore:", key="discover_gemini_models"):
-                try:
-                    with st.spinner("Checking models available to this API key…"):
-                        st.session_state["gemini_available_models"] = GeminiClient().models()
-                    if not st.session_state["gemini_available_models"]:
-                        st.info("This API key has no models available for text generation.")
-                except GeminiError as exc:
-                    st.error(str(exc))
-            models = st.session_state.get("gemini_available_models", [])
-            if models:
-                previous_model = st.session_state.get("gemini_model")
-                model_index = models.index(previous_model) if previous_model in models else 0
-                st.selectbox("Account-available text model", models, index=model_index, key="gemini_model")
+    st.session_state["dm_gemini_cloud_consent"] = consent
+    if not get_api_key():
+        st.error(GEMINI_FAILURE_MESSAGE)
     else:
-        st.session_state["dm_gemini_cloud_consent"] = False
-        st.caption("Local Ollama remains the selected generation provider. Retrieved document text is not sent to Gemini.")
+        st.caption("Gemini API key is configured. The key is never displayed.")
 
     section_heading("Retrieval preferences", "Applied to new processing and searches")
     left, right = st.columns(2)
@@ -789,7 +704,7 @@ def settings_page() -> None:
         st.markdown("**Local storage**")
         st.code(str(DATA), language=None)
 
-    st.caption("PDF extraction, SQLite, embeddings, and retrieval remain local. Gemini receives extracted text for requested summaries or retrieved passages with the question for Q&A, only after explicit selection and consent.")
+    st.caption("PDF extraction, SQLite, embeddings, and retrieval remain local. Gemini receives text only after explicit consent and when you request generation.")
     section_heading("Index maintenance", "SQLite remains the source of truth")
     if st.button("Rebuild saved embeddings", icon=":material/refresh:", key="rebuild_index"):
         rows = STORE.chunks()
@@ -822,12 +737,8 @@ def run() -> None:
     st.session_state.setdefault("dm_page", "Overview")
     st.session_state.setdefault("conversation", [])
     st.session_state.setdefault(
-        "dm_selected_provider",
-        normalize_provider(st.session_state.get("ai_provider", "ollama")) or "ollama",
-    )
-    st.session_state.setdefault(
         "dm_gemini_cloud_consent",
-        bool(st.session_state.get("gemini_cloud_consent", False)),
+        False,
     )
     docs = STORE.documents()
     stats = STORE.stats()

@@ -34,11 +34,10 @@ def summarize(text: str, llm=None, max_chars: int = 12000) -> dict:
               "Do not infer missing facts; say None found when unsupported.\n\nSOURCE:\n" + text[:max_chars])
     try:
         generated = llm.generate(prompt)
-        provider = getattr(llm, "provider", "local model")
+        provider = getattr(llm, "provider", "AI provider")
         return {**fallback, "generated": generated, "method": f"{provider} with extractive evidence"}
     except Exception:
-        # Cloud errors need to reach the UI so quota, auth, and connectivity issues
-        # are not silently presented as a successful local model summary.
+        # Gemini errors need to reach the UI instead of appearing as successful summaries.
         if getattr(llm, "provider", "") == "Gemini":
             raise
         return fallback

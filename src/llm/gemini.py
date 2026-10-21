@@ -4,6 +4,8 @@ from __future__ import annotations
 import os
 from typing import Any
 
+GEMINI_FAILURE_MESSAGE = "Gemini could not generate a response. Check the GEMINI_API_KEY Streamlit secret and try again."
+
 
 class GeminiError(RuntimeError):
     """A safe, user-facing Gemini setup or request error."""
@@ -11,17 +13,14 @@ class GeminiError(RuntimeError):
 
 def get_api_key() -> str | None:
     """Read credentials without displaying, logging, or persisting them."""
-    key = os.getenv("GEMINI_API_KEY", "").strip()
-    if key:
-        return key
     try:
         import streamlit as st
 
         key = str(st.secrets.get("GEMINI_API_KEY", "")).strip()
-        return key or None
     except Exception:
         # Streamlit secrets can be unavailable outside an app context or when unset.
-        return None
+        key = ""
+    return key or os.getenv("GEMINI_API_KEY", "").strip() or None
 
 
 class GeminiClient:
@@ -58,7 +57,7 @@ class GeminiClient:
             return GeminiError("Gemini could not authenticate this request. Check the API key and its access in Google AI Studio.")
         if any(term in detail for term in ("timeout", "connection", "network", "dns", "unavailable")):
             return GeminiError("Gemini could not be reached. Check your network connection and try again.")
-        return GeminiError("Gemini could not complete the request. Try again, or switch back to local AI.")
+        return GeminiError(GEMINI_FAILURE_MESSAGE)
 
     def models(self) -> list[str]:
         """List models this key can use for text generation."""
@@ -79,7 +78,7 @@ class GeminiClient:
 
     def generate(self, prompt: str) -> str:
         if not self.available():
-            raise GeminiError("Gemini is not configured. Add GEMINI_API_KEY in Settings before selecting Gemini.")
+            raise GeminiError("Gemini is not configured. Add GEMINI_API_KEY to Streamlit secrets.")
         client = self._get_client()
         model = self.model
         if not model:
@@ -91,9 +90,30 @@ class GeminiClient:
             response = client.models.generate_content(model=model, contents=prompt)
             result = (getattr(response, "text", None) or "").strip()
             if not result:
-                raise GeminiError("Gemini returned no text. Review the request and try again.")
+                raise GeminiError("Gemini returned no text.")
             return result
         except GeminiError:
             raise
         except Exception as exc:
             raise self._friendly_error(exc) from None
+
+
+def answer_with_gemini(question: str, sources: list[dict[str, Any]], *, cloud_consent: bool,
+                       client_factory=GeminiClient) -> str:
+    """Answer a question from retrieved evidence with Gemini only."""
+    if not cloud_consent:
+        raise GeminiError("Enable Gemini cloud consent in Settings before asking. No document text was sent.")
+    evidence = "\n\n".join(
+        f"[Source {index + 1}: {source['name']}, page {source['page']}]\n{source['text']}"
+        for index, source in enumerate(sources)
+    )
+    prompt = (
+        "Answer only from the retrieved evidence. If evidence is insufficient, say so plainly. "
+        "Cite evidence only with the exact labels [Source 1], [Source 2], etc. shown below. "
+        "Do not invent document names, page numbers, or source labels.\n\n"
+        f"QUESTION: {question}\n\nSOURCES:\n{evidence}"
+    )
+    try:
+        return client_factory().generate(prompt)
+    except Exception:
+        raise GeminiError(GEMINI_FAILURE_MESSAGE) from None

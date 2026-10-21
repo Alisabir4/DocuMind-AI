@@ -7,7 +7,6 @@ from src.database.store import Store
 from src.document_processing.pdf import DocumentError, PageText, chunk_pages, extract_pdf
 from src.services.documents import ingest
 from src.llm.summarize import summarize
-from src.llm.ollama import OllamaClient
 from src.retrieval.index import Retriever
 
 def pdf_bytes(text="A useful agreement begins on 2025-04-10. The team must submit the report by Friday."):
@@ -45,19 +44,9 @@ def test_index_retrieval_and_citation_page():
     got=Retriever(FakeEncoder()).search("contract",chunks,1)
     assert got[0]["name"]=="terms.pdf" and got[0]["page"]==7
 
-def test_missing_ollama_summary_fallback():
-    class Missing:
-        def available(self): return False
-    result=summarize("The agreement starts in 2025. The parties must respond by 2025-09-01. This is a sufficiently long sentence about the main provisions of the agreement.", Missing())
+def test_extractive_summary_without_generator():
+    result=summarize("The agreement starts in 2025. The parties must respond by 2025-09-01. This is a sufficiently long sentence about the main provisions of the agreement.")
     assert result["method"]=="extractive" and "2025" in result["dates"]
-
-def test_missing_ollama_model_behavior(monkeypatch):
-    class Response:
-        def raise_for_status(self): pass
-        def json(self): return {"models":[{"name":"other:latest"}]}
-    monkeypatch.setattr("src.llm.ollama.requests.get", lambda *a, **k: Response())
-    client=OllamaClient(model="missing:latest")
-    assert client.available() is False
 
 def test_page_labels_persist(tmp_path):
     store=Store(tmp_path/"db.sqlite"); doc=fitz.open(); doc.new_page().insert_text((72,72),"Evidence on this page."); doc.new_page().insert_text((72,72),"More evidence on page two."); data=doc.tobytes(); doc.close()
