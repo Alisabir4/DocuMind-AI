@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import html
+import logging
 import re
 from pathlib import Path
 from typing import Any
@@ -13,7 +14,7 @@ from src.database.store import Store
 from src.embeddings.encoder import Encoder, MODEL_NAME
 from src.llm.gemini import GeminiClient, GeminiError, get_api_key
 from src.llm.ollama import OllamaClient
-from src.llm.providers import OllamaUnavailable, generate_text, normalize_provider
+from src.llm.providers import OllamaGenerationError, OllamaUnavailable, generate_text, normalize_provider, remember_provider_selection
 from src.llm.summarize import summarize
 from src.retrieval.index import Retriever
 from src.services.documents import ingest
@@ -21,6 +22,7 @@ from src.services.documents import ingest
 ROOT = Path(__file__).parent
 DATA = Path(os.getenv("DOCUMIND_DATA_DIR", str(ROOT / "data")))
 STORE = Store(DATA / "documind.sqlite3")
+logger = logging.getLogger("documind")
 
 st.set_page_config(
     page_title="DocuMind AI",
@@ -580,6 +582,13 @@ def answer_question(question: str, selected: list[dict[str, Any]]) -> None:
             f"QUESTION: {question}\n\nSOURCES:\n{evidence}"
         )
         if matches:
+            provider_id = normalize_provider(provider) or "unrecognized"
+            logger.warning(
+                "qa_diagnostic selected_provider=%s gemini_api_key_configured=%s cloud_consent=%s",
+                provider_id,
+                bool(get_api_key()),
+                bool(st.session_state.get("gemini_cloud_consent", False)),
+            )
             try:
                 answer = generate_text(
                     provider,
@@ -591,6 +600,8 @@ def answer_question(question: str, selected: list[dict[str, Any]]) -> None:
                 answer = str(exc)
             except OllamaUnavailable:
                 answer = "I found relevant passages, but a generative answer is unavailable because the configured Ollama model is not running. Review the cited evidence on the right."
+            except OllamaGenerationError as exc:
+                answer = str(exc)
             except ValueError as exc:
                 answer = str(exc)
             valid_labels = {f"Source {index + 1}" for index in range(len(sources))}
@@ -601,6 +612,11 @@ def answer_question(question: str, selected: list[dict[str, Any]]) -> None:
             answer = "The selected documents do not contain enough indexed evidence to answer this question."
         st.session_state["conversation"].append({"role": "assistant", "content": answer, "sources": sources})
     except Exception as exc:
+        logger.warning(
+            "qa_diagnostic stage=retrieval_or_request exception_type=%s error=%s",
+            type(exc).__name__,
+            f"status {getattr(exc, 'status_code', '')}" if str(getattr(exc, "status_code", "")).isdigit() else "details omitted",
+        )
         st.session_state["conversation"].append({
             "role": "assistant",
             "content": f"Local semantic search could not start: {exc}. Install the project dependencies and allow the embedding model to download on first use.",
@@ -715,19 +731,29 @@ def settings_page() -> None:
             st.caption("Optional local generation. Ollama processes prompts on this device.")
 
     section_heading("AI provider and privacy", "Cloud use is off until you choose Gemini and enable consent")
+    # Keep the canonical value separate from the Settings-only widget key.
+    # Streamlit cleans up widget state when its page is not rendered, so a
+    # widget keyed directly as ai_provider silently reverted to the Ollama default
+    # after navigating from Settings to Ask Your Documents.
+    if "_ai_provider_widget" not in st.session_state:
+        st.session_state["_ai_provider_widget"] = normalize_provider(st.session_state.get("ai_provider", "ollama")) or "ollama"
     provider = st.radio(
         "Generation provider",
         ["ollama", "gemini"],
         format_func=lambda item: "Local · Ollama" if item == "ollama" else "Cloud · Google Gemini",
         horizontal=True,
-        key="ai_provider",
+        key="_ai_provider_widget",
     )
+    remember_provider_selection(st.session_state, provider)
     if provider == "gemini":
         st.warning("Gemini sends the question and retrieved passages for Q&A, or the selected document’s extracted text for summaries, to Google for generation. PDF files, the local database, embeddings, and chat history are not uploaded. Review your organization’s data policy before enabling cloud mode.")
-        st.checkbox(
+        if "_gemini_consent_widget" not in st.session_state:
+            st.session_state["_gemini_consent_widget"] = bool(st.session_state.get("gemini_cloud_consent", False))
+        consent = st.checkbox(
             "I understand document text for summaries, or retrieved passages and my question for Q&A, will be sent to Google Gemini when I request generation.",
-            key="gemini_cloud_consent",
+            key="_gemini_consent_widget",
         )
+        st.session_state["gemini_cloud_consent"] = consent
         api_key_present = bool(get_api_key())
         if not api_key_present:
             st.info("Gemini API key not found. Set GEMINI_API_KEY in the environment or add it to .streamlit/secrets.toml. The key is never shown in this app.")
@@ -792,6 +818,7 @@ def settings_page() -> None:
 def run() -> None:
     st.session_state.setdefault("dm_page", "Overview")
     st.session_state.setdefault("conversation", [])
+    st.session_state.setdefault("ai_provider", "ollama")
     docs = STORE.documents()
     stats = STORE.stats()
     sidebar(stats)

@@ -1,7 +1,7 @@
 import pytest
 
 from src.llm.gemini import GeminiError
-from src.llm.providers import OllamaUnavailable, generate_text, normalize_provider
+from src.llm.providers import OllamaUnavailable, generate_text, normalize_provider, remember_provider_selection
 
 
 class FakeGemini:
@@ -73,6 +73,24 @@ def test_gemini_failure_is_not_silently_routed_to_ollama():
     assert ollama_created == []
 
 
+def test_provider_diagnostics_report_route_without_prompt_or_raw_error(caplog):
+    gemini = FakeGemini(error=GeminiError("Gemini failure included PRIVATE_PASSAGE and raw payload."))
+    with pytest.raises(GeminiError):
+        generate_text(
+            "gemini",
+            "PRIVATE_QUESTION_AND_PASSAGE",
+            cloud_consent=True,
+            gemini_factory=lambda: gemini,
+            ollama_factory=lambda: pytest.fail("Ollama must not be called"),
+        )
+    assert "received_provider=gemini" in caplog.text
+    assert "adapter_called=gemini" in caplog.text
+    assert "exception_type=GeminiError" in caplog.text
+    assert "provider error details omitted" in caplog.text
+    assert "PRIVATE_QUESTION_AND_PASSAGE" not in caplog.text
+    assert "PRIVATE_PASSAGE" not in caplog.text
+
+
 def test_local_selection_uses_ollama():
     ollama = FakeOllama()
     gemini_created = []
@@ -97,3 +115,11 @@ def test_unknown_provider_is_not_treated_as_ollama():
     assert normalize_provider("unexpected") is None
     with pytest.raises(ValueError, match="not recognized"):
         generate_text("unexpected", "prompt", cloud_consent=True)
+
+
+def test_provider_choice_is_persisted_outside_page_scoped_widget_state():
+    session = {"_ai_provider_widget": "gemini"}
+    assert remember_provider_selection(session, session["_ai_provider_widget"]) == "gemini"
+    # Streamlit removes widget-owned state when that widget is not rendered.
+    session.pop("_ai_provider_widget")
+    assert session["ai_provider"] == "gemini"
