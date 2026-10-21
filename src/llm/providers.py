@@ -50,10 +50,10 @@ def normalize_provider(value: object) -> str | None:
 
 
 def remember_provider_selection(state: MutableMapping[str, Any], value: object) -> str | None:
-    """Persist provider choice outside the Settings-only widget key."""
+    """Persist provider choice outside legacy and Settings-only widget keys."""
     selected = normalize_provider(value)
     if selected:
-        state["ai_provider"] = selected
+        state["dm_selected_provider"] = selected
     return selected
 
 

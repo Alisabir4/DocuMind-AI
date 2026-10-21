@@ -1,6 +1,6 @@
 import pytest
 
-from src.llm.gemini import GeminiError
+from src.llm.gemini import GeminiClient, GeminiError
 from src.llm.providers import OllamaUnavailable, generate_text, normalize_provider, remember_provider_selection
 
 
@@ -57,6 +57,18 @@ def test_gemini_consent_is_required_before_client_creation():
             gemini_factory=lambda: client_created.append(True),
         )
     assert client_created == []
+
+
+def test_missing_gemini_key_is_reported_without_ollama_fallback(monkeypatch):
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    with pytest.raises(GeminiError, match="not configured"):
+        generate_text(
+            "gemini",
+            "prompt",
+            cloud_consent=True,
+            gemini_factory=lambda: GeminiClient(api_key=""),
+            ollama_factory=lambda: pytest.fail("Gemini selection must not fall back to Ollama"),
+        )
 
 
 def test_gemini_failure_is_not_silently_routed_to_ollama():
@@ -118,8 +130,9 @@ def test_unknown_provider_is_not_treated_as_ollama():
 
 
 def test_provider_choice_is_persisted_outside_page_scoped_widget_state():
-    session = {"_ai_provider_widget": "gemini"}
+    session = {"_ai_provider_widget": "gemini", "ai_provider": "ollama"}
     assert remember_provider_selection(session, session["_ai_provider_widget"]) == "gemini"
-    # Streamlit removes widget-owned state when that widget is not rendered.
+    # Streamlit can still clean legacy widget keys retained by a live session.
     session.pop("_ai_provider_widget")
-    assert session["ai_provider"] == "gemini"
+    session.pop("ai_provider")
+    assert session["dm_selected_provider"] == "gemini"
