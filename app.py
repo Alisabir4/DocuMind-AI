@@ -13,6 +13,7 @@ from src.database.store import Store
 from src.embeddings.encoder import Encoder, MODEL_NAME
 from src.llm.gemini import GeminiClient, GeminiError, get_api_key
 from src.llm.ollama import OllamaClient
+from src.llm.providers import OllamaUnavailable, generate_text, normalize_provider
 from src.llm.summarize import summarize
 from src.retrieval.index import Retriever
 from src.services.documents import ingest
@@ -479,7 +480,7 @@ def analysis_page(docs: list[dict[str, Any]]) -> None:
     with action_col:
         generate = st.button("Generate analysis", type="primary", icon=":material/auto_awesome:", use_container_width=True, key="generate_analysis")
     with info_col:
-        provider = st.session_state.get("ai_provider", "ollama")
+        provider = normalize_provider(st.session_state.get("ai_provider", "ollama")) or "ollama"
         caption = "Uses extractive evidence by default. Ollama can add a local generated overview when available."
         if provider == "gemini":
             caption = "Gemini cloud mode is selected. Source text is sent only after you enable consent in Settings."
@@ -572,35 +573,30 @@ def answer_question(question: str, selected: list[dict[str, Any]]) -> None:
             for index, source in enumerate(sources)
         )
         provider = st.session_state.get("ai_provider", "ollama")
-        if provider == "gemini" and not st.session_state.get("gemini_cloud_consent", False):
-            answer = "Gemini cloud mode is selected, but cloud-data consent is not enabled. No document text was sent. Enable consent in Settings or switch to local mode."
-        elif matches and provider == "gemini":
-            llm = GeminiClient(model=st.session_state.get("gemini_model"))
+        prompt = (
+            "Answer only from the retrieved evidence. If evidence is insufficient, say so plainly. "
+            "Cite evidence only with the exact labels [Source 1], [Source 2], etc. shown below. "
+            "Do not invent document names, page numbers, or source labels.\n\n"
+            f"QUESTION: {question}\n\nSOURCES:\n{evidence}"
+        )
+        if matches:
             try:
-                answer = llm.generate(
-                    "Answer only from the retrieved evidence. If evidence is insufficient, say so plainly. "
-                    "Cite evidence only with the exact labels [Source 1], [Source 2], etc. shown below. "
-                    "Do not invent document names, page numbers, or source labels.\n\n"
-                    f"QUESTION: {question}\n\nSOURCES:\n{evidence}"
+                answer = generate_text(
+                    provider,
+                    prompt,
+                    cloud_consent=bool(st.session_state.get("gemini_cloud_consent", False)),
+                    gemini_factory=lambda: GeminiClient(model=st.session_state.get("gemini_model")),
                 )
-                valid_labels = {f"Source {index + 1}" for index in range(len(sources))}
-                for label in re.findall(r"Source\s+\d+", answer):
-                    if label not in valid_labels:
-                        answer = answer.replace(label, "")
             except GeminiError as exc:
                 answer = str(exc)
-        elif matches and OllamaClient().available():
-            answer = OllamaClient().generate(
-                "Answer only from the sources below. If evidence is insufficient, say so. "
-                "Cite only the source labels shown. Never create a page number.\n\n"
-                f"QUESTION: {question}\n\nSOURCES:\n{evidence}"
-            )
+            except OllamaUnavailable:
+                answer = "I found relevant passages, but a generative answer is unavailable because the configured Ollama model is not running. Review the cited evidence on the right."
+            except ValueError as exc:
+                answer = str(exc)
             valid_labels = {f"Source {index + 1}" for index in range(len(sources))}
             for label in re.findall(r"Source\s+\d+", answer):
                 if label not in valid_labels:
                     answer = answer.replace(label, "")
-        elif matches:
-            answer = "I found relevant passages, but a generative answer is unavailable because the configured Ollama model is not running. Review the cited evidence on the right."
         else:
             answer = "The selected documents do not contain enough indexed evidence to answer this question."
         st.session_state["conversation"].append({"role": "assistant", "content": answer, "sources": sources})
@@ -617,7 +613,7 @@ def ask_page(docs: list[dict[str, Any]]) -> None:
     if not available:
         empty("Your research space is empty", "Import and process a text-based PDF to ask questions with page citations.")
         return
-    if st.session_state.get("ai_provider") == "gemini" and st.session_state.get("gemini_cloud_consent", False):
+    if normalize_provider(st.session_state.get("ai_provider")) == "gemini" and st.session_state.get("gemini_cloud_consent", False):
         st.info("Cloud AI is enabled. Your question and retrieved passages will be sent to Google Gemini; source retrieval and citations remain local.")
     selected = st.multiselect("Search across", available, default=available, format_func=lambda doc: doc["name"], key="qa_documents")
     chat_col, sources_col = st.columns([1.15, .85], gap="large")
