@@ -193,20 +193,6 @@ div[data-testid="stFileUploader"]:hover, div[data-testid="stFileUploader"]:focus
 div[data-testid="stFileUploader"] button { color:var(--dm-ink); border-color:var(--dm-line); background:var(--dm-elevated); }
 div[data-testid="stFileUploader"] section { color:var(--dm-muted); }
 div[data-testid="stVerticalBlockBorderWrapper"]:has(.drop-hint) { border-color:#547665; background:linear-gradient(115deg,rgba(53,201,138,.085),rgba(22,49,39,.96) 82%); box-shadow:0 8px 26px rgba(0,0,0,.2),0 0 24px rgba(53,201,138,.045); }
-/* Keep the four analysis sections visually grouped without changing their data. */
-div[data-testid="stHorizontalBlock"]:has(.analysis-card-marker) { gap:24px !important; align-items:stretch; }
-div[data-testid="stVerticalBlockBorderWrapper"]:has(.analysis-card-marker) {
-  height:100%; background:var(--dm-card); border:1px solid var(--dm-line); border-radius:12px;
-  padding:16px 18px; box-shadow:var(--dm-shadow); transition:border-color .15s ease, transform .15s ease;
-}
-div[data-testid="stVerticalBlockBorderWrapper"]:has(.analysis-card-marker):hover { border-color:#47745E; }
-.analysis-card-marker { display:none; }
-.analysis-card-title { color:#FFFFFF; font-size:1.02rem; font-weight:680; line-height:1.35; margin:0 0 14px; }
-.analysis-card-copy { color:var(--dm-muted); line-height:1.65; }
-.analysis-source-entry { padding:.7rem .75rem; margin:.55rem 0; border:1px solid rgba(53,201,138,.2); border-left:2px solid var(--dm-emerald); border-radius:8px; background:rgba(22,49,39,.48); }
-.analysis-grid-row-gap { height:8px; }
-.analysis-field-label { color:var(--dm-mint); font-size:.72rem; font-weight:650; margin:.45rem 0 .15rem; }
-.analysis-field-value { color:var(--dm-muted); line-height:1.55; }
 div[data-testid="stDataFrame"], div[data-testid="stTable"] { border:1px solid var(--dm-line); border-radius:10px; overflow:hidden; background:var(--dm-card); color:var(--dm-ink); }
 div[data-testid="stDataFrame"] canvas { color-scheme:dark; }
 table { color:var(--dm-ink); border-color:var(--dm-line); }
@@ -215,7 +201,7 @@ tbody tr td { background:var(--dm-card); color:var(--dm-muted); border-color:var
 div[data-testid="stChatMessage"] { background:var(--dm-card); border:1px solid var(--dm-line); border-radius:10px; padding:.55rem .75rem; color:var(--dm-ink); }
 div[data-testid="stChatMessage"] [data-testid="stMarkdownContainer"] p { color:var(--dm-ink); }
 div[data-testid="stChatInput"] textarea { background:var(--dm-elevated); border-color:var(--dm-line); color:#FFFFFF; }
-div[data-testid="stTabs"] [role="tablist"] { border-bottom:1px solid var(--dm-line); gap:.25rem; }
+div[data-testid="stTabs"] [role="tablist"] { border-bottom:1px solid var(--dm-line); gap:.55rem; }
 div[data-testid="stTabs"] button[role="tab"] { color:var(--dm-muted); border-radius:8px 8px 0 0; }
 div[data-testid="stTabs"] button[role="tab"]:hover { color:#FFFFFF; background:rgba(22,49,39,.8); }
 div[data-testid="stTabs"] button[role="tab"][aria-selected="true"] { color:#70E6AC; border-bottom:2px solid #35C98A; }
@@ -238,8 +224,6 @@ hr { border-color:var(--dm-line) !important; }
   [data-testid="stSidebar"] { width:220px !important; flex-basis:220px !important; min-width:220px; max-width:220px; }
   .doc-row-grid { grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:.65rem; }
   .doc-primary { grid-column:1 / -1; }
-  div[data-testid="stHorizontalBlock"]:has(.analysis-card-marker) { flex-direction:column !important; gap:18px !important; }
-  div[data-testid="stHorizontalBlock"]:has(.analysis-card-marker) > div[data-testid="column"] { width:100% !important; min-width:100% !important; flex:1 1 100% !important; }
 }
 </style>
 """,
@@ -523,67 +507,54 @@ def analysis_page(docs: list[dict[str, Any]]) -> None:
     result = cached[1]
     method = result.get("method", "extractive")
     st.caption(f"Analysis method: {method}. Values come from extracted source text; review the page references before relying on them.")
-    left, right = st.columns(2, gap="small")
-    with left:
+    tabs = st.tabs(["Summary", "Key Points", "Extracted Information", "Sources"])
+    with tabs[0]:
         with st.container(border=True):
-            st.markdown('<span class="analysis-card-marker" aria-hidden="true"></span><div class="analysis-card-title">Summary</div>', unsafe_allow_html=True)
             if result.get("generated"):
-                st.markdown("#### AI-generated overview")
+                st.markdown("#### Local model overview")
                 st.write(result["generated"])
                 st.caption("Model-generated interpretation. Verify each claim against the source passages.")
-                st.divider()
-            st.markdown("#### Extractive overview")
+        with st.container(border=True):
+            st.markdown("#### Overview")
             st.write(result["overview"])
             st.caption("Extractive summary assembled from source sentences.")
-    with right:
-        with st.container(border=True):
-            st.markdown('<span class="analysis-card-marker" aria-hidden="true"></span><div class="analysis-card-title">Key Points</div>', unsafe_allow_html=True)
-            points = result.get("key_points", [])
-            if points:
-                for index, point in enumerate(points):
-                    page = result.get("key_point_pages", [])[index] if index < len(result.get("key_point_pages", [])) else None
-                    st.markdown(f'<div class="analysis-card-copy">{html.escape(str(point))}</div>', unsafe_allow_html=True)
+    with tabs[1]:
+        points = result.get("key_points", [])
+        if points:
+            for index, point in enumerate(points):
+                page = result.get("key_point_pages", [])[index] if index < len(result.get("key_point_pages", [])) else None
+                with st.container(border=True):
+                    st.write(point)
                     if page is not None:
                         st.caption(f"Source · {chosen['name']} · page {page}")
-            else:
-                st.markdown('<div class="analysis-card-copy">No supported key points found. The extracted text did not contain enough complete sentences for a useful summary.</div>', unsafe_allow_html=True)
-            actions = result.get("action_items", [])
-            if actions:
-                st.markdown("#### Potential action items")
-                st.caption("Heuristic matches from source language")
-                for action in actions:
-                    st.markdown(f"- {action}")
-
-    st.markdown('<div class="analysis-grid-row-gap" aria-hidden="true"></div>', unsafe_allow_html=True)
-    left, right = st.columns(2, gap="small")
-    with left:
+        else:
+            empty("No supported key points found", "The extracted text did not contain enough complete sentences for a useful summary.")
+        actions = result.get("action_items", [])
+        if actions:
+            section_heading("Potential action items", "Heuristic matches from source language")
+            for action in actions:
+                st.markdown(f"- {action}")
+    with tabs[2]:
+        x, y, z = st.columns(3)
+        with x:
+            with st.container(border=True):
+                st.markdown("#### Dates")
+                st.write(", ".join(result.get("dates", [])) or "None found")
+        with y:
+            with st.container(border=True):
+                st.markdown("#### Numbers")
+                st.write(", ".join(result.get("numbers", [])) or "None reliably identified")
+        with z:
+            with st.container(border=True):
+                st.markdown("#### Named entities")
+                st.write(", ".join(result.get("entities", [])) or "None reliably identified")
+        st.caption("Dates, numbers, and names are extracted using local text patterns. They are not independently verified or classified.")
+    with tabs[3]:
         with st.container(border=True):
-            st.markdown('<span class="analysis-card-marker" aria-hidden="true"></span><div class="analysis-card-title">Extracted Information</div>', unsafe_allow_html=True)
-            fields = (
-                ("Dates", ", ".join(result.get("dates", [])) or "None found"),
-                ("Numbers", ", ".join(result.get("numbers", [])) or "None reliably identified"),
-                ("Named entities", ", ".join(result.get("entities", [])) or "None reliably identified"),
-            )
-            for label, value in fields:
-                st.markdown(f'<div class="analysis-field-label">{html.escape(label)}</div><div class="analysis-field-value">{html.escape(value)}</div>', unsafe_allow_html=True)
-            st.caption("Dates, numbers, and names are extracted using local text patterns. They are not independently verified or classified.")
-    with right:
-        with st.container(border=True):
-            st.markdown('<span class="analysis-card-marker" aria-hidden="true"></span><div class="analysis-card-title">Sources</div>', unsafe_allow_html=True)
-            source_text = STORE.page_text(chosen["id"])
-            found_source = False
-            for line in source_text.split("\n\n"):
+            for line in STORE.page_text(chosen["id"]).split("\n\n"):
                 if line.strip():
-                    found_source = True
-                    parts = line.splitlines()
-                    passage = html.escape("\n".join(parts[1:])).replace("\n", "<br>")
-                    st.markdown(
-                        f'<div class="analysis-source-entry"><div class="source-head">{html.escape(parts[0])}</div>'
-                        f'<div class="analysis-card-copy">{passage}</div></div>',
-                        unsafe_allow_html=True,
-                    )
-            if not found_source:
-                st.caption("No page-labeled source passages are available for this document.")
+                    st.markdown(f"**{line.splitlines()[0]}**")
+                    st.write("\n".join(line.splitlines()[1:]))
 
 
 def answer_question(question: str, selected: list[dict[str, Any]]) -> None:
