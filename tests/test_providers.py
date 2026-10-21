@@ -136,3 +136,22 @@ def test_provider_choice_is_persisted_outside_page_scoped_widget_state():
     session.pop("_ai_provider_widget")
     session.pop("ai_provider")
     assert session["dm_selected_provider"] == "gemini"
+
+
+def test_persisted_gemini_choice_reaches_gemini_dispatcher_after_widget_cleanup():
+    session = {"_ai_provider_widget": "gemini", "ai_provider": "ollama"}
+    remember_provider_selection(session, session["_ai_provider_widget"])
+    session.pop("_ai_provider_widget")
+    session.pop("ai_provider")
+    gemini = FakeGemini()
+
+    answer = generate_text(
+        session["dm_selected_provider"],
+        "grounded prompt",
+        cloud_consent=True,
+        gemini_factory=lambda: gemini,
+        ollama_factory=lambda: pytest.fail("Persisted Gemini selection must never call Ollama"),
+    )
+
+    assert answer == "Gemini answer [Source 1]."
+    assert gemini.prompts == ["grounded prompt"]
